@@ -1,23 +1,25 @@
 """
 update_prices.py
 ────────────────
-Fetches the latest closing prices for Vietnamese stocks via yfinance
-and writes them into a Google Sheet.
+Fetches the latest closing prices for Vietnamese stocks and writes them
+into a Google Sheet.
 
-Sheet convention (configurable via SHEET_CONFIG below):
-  Column A : ticker symbols as you type them (e.g. VIC, LPB, HPG)
-  Column B : last closing price  (written by this script)
-  Column C : date of that price  (written by this script)
+Data sources (chosen per ticker based on an "Exchange" column in the sheet):
+  • yfinance (Yahoo Finance)  — for HOSE and HNX tickers
+  • vnstock  (TCBS backend)   — for UPCoM tickers (e.g. F88)
+
+Sheet layout (columns are 0-indexed; edit SHEET_CONFIG to match yours):
+  Col A (0): Ticker   e.g. VIC, LPB, F88
+  Col B (1): Exchange e.g. HOSE, HNX, or UPCOM   ← NEW column
+  Col C (2): Last Close price   (written by this script)
+  Col D (3): Price Date         (written by this script)
   Row 1    : headers — skipped automatically
-
-Set TICKER_COL / PRICE_COL / DATE_COL to match your actual sheet layout.
 """
 
 import os
 import json
-import time
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 
 import yfinance as yf
 import gspread
@@ -31,61 +33,47 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Sheet layout config — change these to match YOUR sheet ─────────────────
+# ── Sheet layout — edit to match YOUR sheet ────────────────────────────────
 SHEET_CONFIG = {
-    "spreadsheet_id": os.environ["SPREADSHEET_ID"],   # set in GitHub Secret
-    "worksheet_name": "Portfolio",                     # tab name in your sheet
-    "header_rows": 1,                                  # rows to skip at top
-    "ticker_col": 0,   # 0-indexed: column A = 0
-    "price_col": 1,    # 0-indexed: column B = 1
-    "date_col": 2,     # 0-indexed: column C = 2
+    "spreadsheet_id":  os.environ["SPREADSHEET_ID"],
+    "worksheet_name":  "Portfolio",
+    "header_rows":     1,
+    "ticker_col":      0,   # col A
+    "exchange_col":    1,   # col B  ← NEW: HOSE / HNX / UPCOM
+    "price_col":       2,   # col C
+    "date_col":        3,   # col D
 }
 
-# Vietnam timezone offset (ICT = UTC+7)
+# Vietnam timezone (ICT = UTC+7)
 ICT = timezone(timedelta(hours=7))
 
-# ── Google Sheets auth ─────────────────────────────────────────────────────
+# Google Sheets API scopes
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
+
+# ── Auth ───────────────────────────────────────────────────────────────────
 def get_gspread_client() -> gspread.Client:
-    """
-    Authenticate using the service-account JSON stored as a GitHub Secret.
-    The secret value is the full JSON content (minified to one line).
-    """
-    creds_json = os.environ["GOOGLE_CREDENTIALS"]
-    creds_dict = json.loads(creds_json)
+    creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
-# ── Price fetching ─────────────────────────────────────────────────────────
-def yf_ticker(symbol: str) -> str:
-    """
-    Convert a plain Vietnamese ticker (e.g. 'VIC') to Yahoo Finance format.
-    HOSE & HNX stocks both use the .VN suffix on Yahoo Finance.
-    UPCoM stocks are also reachable this way in most cases.
-    """
-    return f"{symbol.strip().upper()}.VN"
+# ── yfinance: HOSE & HNX ───────────────────────────────────────────────────
+def fetch_via_yfinance(tickers: list[str]) -> dict[str, tuple[float | None, str | None]]:
+    """Fetch closing prices via Yahoo Finance using the .VN suffix."""
+    if not tickers:
+        return {}
 
+    yf_map = {f"{t.upper()}.VN": t for t in tickers}   # "VIC.VN" → "VIC"
+    results: dict[str, tuple[float | None, str | None]] = {t: (None, None) for t in tickers}
 
-def fetch_closing_prices(tickers: list[str]) -> dict[str, tuple[float | None, str | None]]:
-    """
-    Download the most recent available closing price for each ticker.
-
-    Returns a dict:  { 'VIC': (price_float, 'YYYY-MM-DD'), ... }
-    Missing / failed tickers get (None, None).
-    """
-    yf_tickers = [yf_ticker(t) for t in tickers]
-    results: dict[str, tuple[float | None, str | None]] = {}
-
-    # Download 5 days of daily data for all tickers in one API call
-    # (5 days ensures we catch the last close even around holidays)
     try:
+        yf_symbols = list(yf_map.keys())
         raw = yf.download(
-            tickers=yf_tickers,
+            tickers=yf_symbols,
             period="5d",
             interval="1d",
             auto_adjust=True,
@@ -93,114 +81,191 @@ def fetch_closing_prices(tickers: list[str]) -> dict[str, tuple[float | None, st
             group_by="ticker",
         )
     except Exception as exc:
-        log.error("yfinance download failed: %s", exc)
-        return {t: (None, None) for t in tickers}
+        log.error("yfinance batch download failed: %s", exc)
+        return results
 
-    for original, yf_sym in zip(tickers, yf_tickers):
+    for yf_sym, original in yf_map.items():
         try:
-            if len(yf_tickers) == 1:
-                # Single-ticker download has a flat column structure
+            if len(yf_symbols) == 1:
                 close_series = raw["Close"]
             else:
                 close_series = raw[yf_sym]["Close"]
 
             close_series = close_series.dropna()
             if close_series.empty:
-                log.warning("No data returned for %s", original)
-                results[original] = (None, None)
+                log.warning("yfinance: no data for %s", original)
                 continue
 
-            last_close = float(close_series.iloc[-1])
-            last_date  = close_series.index[-1].strftime("%Y-%m-%d")
-            log.info("%-8s  %s  %.0f", original, last_date, last_close)
-            results[original] = (last_close, last_date)
+            price = float(close_series.iloc[-1])
+            dt    = close_series.index[-1].strftime("%Y-%m-%d")
+            log.info("yfinance  %-8s  %s  %.0f", original, dt, price)
+            results[original] = (price, dt)
 
         except Exception as exc:
-            log.warning("Could not parse data for %s: %s", original, exc)
-            results[original] = (None, None)
+            log.warning("yfinance: parse error for %s — %s", original, exc)
 
     return results
 
 
-# ── Sheet read / write ─────────────────────────────────────────────────────
-def get_tickers_from_sheet(ws: gspread.Worksheet, cfg: dict) -> list[tuple[int, str]]:
+# ── vnstock: UPCoM ─────────────────────────────────────────────────────────
+def fetch_via_vnstock(tickers: list[str]) -> dict[str, tuple[float | None, str | None]]:
     """
-    Read the ticker column and return a list of (row_index_0based, ticker).
-    Rows above header_rows are skipped; empty cells are ignored.
+    Fetch closing prices for UPCoM stocks via vnstock (TCBS backend).
+    vnstock is a Vietnam-native library; TCBS carries UPCoM stocks reliably.
     """
-    col_values = ws.col_values(cfg["ticker_col"] + 1)  # gspread is 1-indexed
-    pairs = []
-    for row_idx, cell in enumerate(col_values):
-        if row_idx < cfg["header_rows"]:
+    if not tickers:
+        return {}
+
+    results: dict[str, tuple[float | None, str | None]] = {t: (None, None) for t in tickers}
+
+    try:
+        from vnstock import Vnstock
+    except ImportError:
+        log.error("vnstock not installed — add it to requirements.txt")
+        return results
+
+    # Determine date range: last 5 calendar days to catch any holidays
+    end_dt   = date.today()
+    start_dt = end_dt - timedelta(days=7)
+    end_str   = end_dt.strftime("%Y-%m-%d")
+    start_str = start_dt.strftime("%Y-%m-%d")
+
+    for ticker in tickers:
+        try:
+            stock = Vnstock().stock(symbol=ticker.upper(), source="TCBS")
+            df = stock.quote.history(
+                start=start_str,
+                end=end_str,
+                interval="1D",
+            )
+            if df is None or df.empty:
+                log.warning("vnstock: no data for %s", ticker)
+                continue
+
+            # vnstock returns columns: time, open, high, low, close, volume
+            close_col = next(
+                (c for c in df.columns if c.lower() in ("close", "close_price")), None
+            )
+            time_col = next(
+                (c for c in df.columns if c.lower() in ("time", "date", "trading_date")), None
+            )
+            if close_col is None:
+                log.warning("vnstock: could not identify close column for %s. Cols: %s", ticker, list(df.columns))
+                continue
+
+            df = df.dropna(subset=[close_col])
+            if df.empty:
+                log.warning("vnstock: all-NaN close for %s", ticker)
+                continue
+
+            price = float(df[close_col].iloc[-1])
+            # Price from TCBS is in thousands VND — multiply by 1000
+            price = price * 1000
+
+            if time_col:
+                raw_date = df[time_col].iloc[-1]
+                # Handle both datetime and string date values
+                if hasattr(raw_date, "strftime"):
+                    dt = raw_date.strftime("%Y-%m-%d")
+                else:
+                    dt = str(raw_date)[:10]
+            else:
+                dt = end_str
+
+            log.info("vnstock   %-8s  %s  %.0f", ticker, dt, price)
+            results[ticker] = (price, dt)
+
+        except Exception as exc:
+            log.warning("vnstock: error for %s — %s", ticker, exc)
+
+    return results
+
+
+# ── Sheet read ─────────────────────────────────────────────────────────────
+def get_ticker_rows(ws: gspread.Worksheet, cfg: dict) -> list[tuple[int, str, str]]:
+    """
+    Returns list of (row_idx_0based, ticker, exchange).
+    Exchange is normalised to uppercase: HOSE, HNX, or UPCOM.
+    If exchange column is blank, defaults to HOSE.
+    """
+    ticker_col   = ws.col_values(cfg["ticker_col"]   + 1)
+    exchange_col = ws.col_values(cfg["exchange_col"] + 1)
+
+    rows = []
+    for i, (ticker, exchange) in enumerate(
+        zip(ticker_col, exchange_col + [""] * len(ticker_col))
+    ):
+        if i < cfg["header_rows"]:
             continue
-        ticker = str(cell).strip()
-        if ticker:
-            pairs.append((row_idx, ticker))
-    return pairs
+        ticker = str(ticker).strip().upper()
+        if not ticker:
+            continue
+        exchange = str(exchange).strip().upper() or "HOSE"
+        rows.append((i, ticker, exchange))
+    return rows
 
 
-def write_prices_to_sheet(
+# ── Sheet write ────────────────────────────────────────────────────────────
+def write_prices(
     ws: gspread.Worksheet,
     cfg: dict,
-    ticker_rows: list[tuple[int, str]],
+    ticker_rows: list[tuple[int, str, str]],
     prices: dict[str, tuple[float | None, str | None]],
 ) -> None:
-    """
-    Build a batch update and send it in a single API call.
-    Only rows where we have a price are updated; failed tickers are skipped.
-    """
-    timestamp = datetime.now(ICT).strftime("%Y-%m-%d %H:%M ICT")
     updates = []
-
-    for row_idx, ticker in ticker_rows:
-        price, price_date = prices.get(ticker, (None, None))
+    for row_idx, ticker, _ in ticker_rows:
+        price, dt = prices.get(ticker, (None, None))
         if price is None:
-            log.warning("Skipping write for %s — no price available.", ticker)
+            log.warning("No price — skipping write for %s", ticker)
             continue
-
-        # gspread batch_update expects A1 notation; rows/cols are 1-indexed
-        sheet_row = row_idx + 1
+        sheet_row  = row_idx + 1
         price_cell = gspread.utils.rowcol_to_a1(sheet_row, cfg["price_col"] + 1)
-        date_cell  = gspread.utils.rowcol_to_a1(sheet_row, cfg["date_col"] + 1)
-
+        date_cell  = gspread.utils.rowcol_to_a1(sheet_row, cfg["date_col"]  + 1)
         updates.append({"range": price_cell, "values": [[price]]})
-        updates.append({"range": date_cell,  "values": [[price_date]]})
+        updates.append({"range": date_cell,  "values": [[dt]]})
 
     if not updates:
-        log.warning("Nothing to write — no prices were fetched successfully.")
+        log.warning("Nothing to write.")
         return
 
     ws.batch_update(updates, value_input_option="USER_ENTERED")
-    log.info("Wrote %d price+date pairs to sheet. (run at %s)", len(updates) // 2, timestamp)
+    run_time = datetime.now(ICT).strftime("%Y-%m-%d %H:%M ICT")
+    log.info("Wrote %d price+date pairs to sheet at %s", len(updates) // 2, run_time)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
 def main() -> None:
     log.info("=== VN Portfolio Price Updater starting ===")
 
-    # 1. Connect to Google Sheets
-    log.info("Authenticating to Google Sheets...")
+    # 1. Connect
     gc = get_gspread_client()
     sh = gc.open_by_key(SHEET_CONFIG["spreadsheet_id"])
     ws = sh.worksheet(SHEET_CONFIG["worksheet_name"])
-    log.info("Opened sheet: '%s' → tab: '%s'", sh.title, ws.title)
+    log.info("Sheet: '%s' → tab: '%s'", sh.title, ws.title)
 
-    # 2. Read tickers from the sheet
-    ticker_rows = get_tickers_from_sheet(ws, SHEET_CONFIG)
+    # 2. Read tickers + exchanges
+    ticker_rows = get_ticker_rows(ws, SHEET_CONFIG)
     if not ticker_rows:
-        log.warning("No tickers found in column %s. Exiting.", SHEET_CONFIG["ticker_col"])
+        log.warning("No tickers found. Exiting.")
         return
-    tickers = [t for _, t in ticker_rows]
-    log.info("Found %d tickers: %s", len(tickers), tickers)
+    log.info("Found %d tickers: %s", len(ticker_rows), [(t, ex) for _, t, ex in ticker_rows])
 
-    # 3. Fetch closing prices from Yahoo Finance
-    log.info("Fetching prices from Yahoo Finance...")
-    prices = fetch_closing_prices(tickers)
+    # 3. Route by exchange
+    yf_tickers     = [t for _, t, ex in ticker_rows if ex in ("HOSE", "HNX")]
+    upcom_tickers  = [t for _, t, ex in ticker_rows if ex == "UPCOM"]
 
-    # 4. Write back to sheet
-    log.info("Writing prices to sheet...")
-    write_prices_to_sheet(ws, SHEET_CONFIG, ticker_rows, prices)
+    prices: dict[str, tuple[float | None, str | None]] = {}
 
+    if yf_tickers:
+        log.info("Fetching %d HOSE/HNX tickers via yfinance...", len(yf_tickers))
+        prices.update(fetch_via_yfinance(yf_tickers))
+
+    if upcom_tickers:
+        log.info("Fetching %d UPCoM tickers via vnstock (TCBS)...", len(upcom_tickers))
+        prices.update(fetch_via_vnstock(upcom_tickers))
+
+    # 4. Write
+    write_prices(ws, SHEET_CONFIG, ticker_rows, prices)
     log.info("=== Done ===")
 
 
