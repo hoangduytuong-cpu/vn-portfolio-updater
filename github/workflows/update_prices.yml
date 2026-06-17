@@ -1,0 +1,46 @@
+# .github/workflows/update_prices.yml
+#
+# Runs every weekday at 15:30 ICT (08:30 UTC) — 1 hour after HOSE closes at 14:30.
+# Also runnable manually from the Actions tab (workflow_dispatch).
+
+name: Update VN Portfolio Prices
+
+on:
+  schedule:
+    #        ┌── minute (30)
+    #        │  ┌── hour in UTC (08 = 15:00 ICT)
+    #        │  │  ┌── day of month (any)
+    #        │  │  │  ┌── month (any)
+    #        │  │  │  │  ┌── day of week (1-5 = Mon-Fri)
+    - cron: "30 8 * * 1-5"
+
+  workflow_dispatch:   # allows manual trigger from GitHub UI
+
+jobs:
+  update-prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5   # safety net — the job should finish in <30 seconds
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"            # caches pip downloads between runs
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run price updater
+        env:
+          # These two secrets are set in:
+          # GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SPREADSHEET_ID:     ${{ secrets.SPREADSHEET_ID }}
+        run: python update_prices.py
+
+      # Optional: if the script fails, the job fails and GitHub notifies you by email.
+      # You can also add a Slack/Telegram notification step here later.

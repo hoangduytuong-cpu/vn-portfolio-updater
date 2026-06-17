@@ -1,0 +1,4 @@
+yfinance>=0.2.40
+gspread>=6.1.0
+google-auth>=2.29.0
+pandas>=2.2.0
