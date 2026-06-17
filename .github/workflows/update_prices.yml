@@ -1,25 +1,39 @@
 # .github/workflows/update_prices.yml
 #
-# Runs every weekday at 15:30 ICT (08:30 UTC) — 1 hour after HOSE closes at 14:30.
-# Also runnable manually from the Actions tab (workflow_dispatch).
+# Runs every 15 minutes during HOSE trading hours (Mon–Fri),
+# then once more 30 minutes after close to capture the final price.
+#
+# HOSE session: 09:00–11:30 and 13:00–14:30 ICT (UTC+7)
+# All times below are UTC (ICT − 7h).
+#
+# Trading windows in UTC:
+#   Morning session : 02:00–04:30 UTC  (09:00–11:30 ICT)
+#   Afternoon session: 06:00–07:30 UTC  (13:00–14:30 ICT)
+#   Post-close run  : 08:00 UTC         (15:00 ICT — final closing price)
+#
+# Cron lines:
+#   */15 2-4  * * 1-5   every 15 min, 02:00–04:59 UTC (morning session)
+#   */15 6-7  * * 1-5   every 15 min, 06:00–07:59 UTC (afternoon session)
+#   0    8    * * 1-5   once at 08:00 UTC             (post-close snapshot)
+#
+# Public repo → unlimited free GitHub-hosted runner minutes.
+# Minimum allowed cron interval on GitHub Actions is 5 minutes.
+# Note: GitHub may delay scheduled runs by up to ~15 min at peak times.
 
 name: Update VN Portfolio Prices
 
 on:
   schedule:
-    #        ┌── minute (30)
-    #        │  ┌── hour in UTC (08 = 15:00 ICT)
-    #        │  │  ┌── day of month (any)
-    #        │  │  │  ┌── month (any)
-    #        │  │  │  │  ┌── day of week (1-5 = Mon-Fri)
-    - cron: "30 8 * * 1-5"
+    - cron: "*/15 2-4 * * 1-5"    # morning session (ICT 09:00–11:59)
+    - cron: "*/15 6-7 * * 1-5"    # afternoon session (ICT 13:00–14:59)
+    - cron: "0 8 * * 1-5"         # post-close final snapshot (ICT 15:00)
 
-  workflow_dispatch:   # allows manual trigger from GitHub UI
+  workflow_dispatch:               # manual trigger from Actions tab
 
 jobs:
   update-prices:
     runs-on: ubuntu-latest
-    timeout-minutes: 5   # safety net — the job should finish in <30 seconds
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -29,18 +43,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"            # caches pip downloads between runs
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run price updater
         env:
-          # These two secrets are set in:
-          # GitHub repo → Settings → Secrets and variables → Actions → New repository secret
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID:     ${{ secrets.SPREADSHEET_ID }}
         run: python update_prices.py
-
-      # Optional: if the script fails, the job fails and GitHub notifies you by email.
-      # You can also add a Slack/Telegram notification step here later.
