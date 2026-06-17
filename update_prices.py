@@ -191,7 +191,7 @@ def fetch_via_vnstock(tickers: list[str]) -> dict[str, tuple[float | None, str |
                 log.warning("vnstock KBS: all-NaN close for %s", ticker)
                 continue
 
-            price = float(df[close_col].iloc[-1])  # KBS prices are full VND
+            price = float(df[close_col].iloc[-1]) * 1000  # KBS prices are full VND
 
             if time_col:
                 raw_date = df[time_col].iloc[-1]
