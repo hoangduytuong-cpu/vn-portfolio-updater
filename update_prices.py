@@ -6,7 +6,7 @@ into a Google Sheet.
 
 Data sources routed by exchange:
   HOSE / HNX  →  yfinance  (Yahoo Finance, .VN suffix)
-  UPCOM       →  vnstock   (TCBS backend — covers F88 and all UPCoM stocks)
+  UPCOM       →  vnstock   (KBS backend — KB Securities, no API key needed)
 
 Sheet layout (0-indexed columns — edit SHEET_CONFIG to match yours):
   Col A (0): Ticker     e.g.  VIC, LPB, F88
@@ -140,11 +140,14 @@ def fetch_via_yfinance(tickers: list[str]) -> dict[str, tuple[float | None, str 
 # ── vnstock: UPCoM (F88 etc.) ──────────────────────────────────────────────
 def fetch_via_vnstock(tickers: list[str]) -> dict[str, tuple[float | None, str | None]]:
     """
-    Fetch prices for UPCoM stocks via vnstock using the TCBS data source.
-    TCBS reliably covers all UPCoM-listed stocks including F88.
+    Fetch prices for UPCoM stocks via vnstock v4 using the KBS (KB Securities)
+    data source. KBS requires no API key and covers all HOSE/HNX/UPCoM stocks
+    including F88.
 
-    For intraday runs we use quote.intraday() which gives the latest tick.
-    For post-market runs intraday still returns the last traded price of the day.
+    vnstock v4 dropped TCBS as a supported source (August 2025). The new
+    API is vnstock.api.quote.Quote with source='KBS'.
+
+    KBS prices are in full VND (not thousands), so no multiplication needed.
     """
     if not tickers:
         return {}
@@ -152,63 +155,43 @@ def fetch_via_vnstock(tickers: list[str]) -> dict[str, tuple[float | None, str |
     results = {t: (None, None) for t in tickers}
 
     try:
-        from vnstock import Vnstock
+        from vnstock.api.quote import Quote
     except ImportError:
-        log.error("vnstock not installed — ensure it is in requirements.txt")
+        log.error("vnstock not installed or too old — ensure vnstock>=4.0.0 in requirements.txt")
         return results
 
     today_str = date.today().strftime("%Y-%m-%d")
-    # history window: last 7 calendar days covers weekends + public holidays
-    start_str = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+    # 10-day window to safely cover weekends + public holidays
+    start_str = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
 
     for ticker in tickers:
         try:
-            stock = Vnstock().stock(symbol=ticker.upper(), source="TCBS")
+            q = Quote(symbol=ticker.upper(), source="KBS")
 
-            # ── Try intraday first (latest tick during/after session) ────────
-            try:
-                df_intra = stock.quote.intraday(
-                    symbol=ticker.upper(),
-                    page_size=1,
-                    show_log=False,
-                )
-                if df_intra is not None and not df_intra.empty:
-                    # intraday columns: time, open, high, low, close, volume
-                    # prices are in thousands VND on TCBS
-                    price = float(df_intra["price"].iloc[-1]) * 1000
-                    dt    = today_str
-                    log.info("vnstock intraday  %-8s  %s  %.0f", ticker, dt, price)
-                    results[ticker] = (price, dt)
-                    continue
-            except Exception as exc:
-                log.debug("vnstock intraday failed for %s: %s — trying history", ticker, exc)
+            df = q.history(start=start_str, end=today_str, interval="1D")
 
-            # ── Fallback: daily history ──────────────────────────────────────
-            df = stock.quote.history(
-                start=start_str,
-                end=today_str,
-                interval="1D",
-            )
             if df is None or df.empty:
-                log.warning("vnstock: no data for %s", ticker)
+                log.warning("vnstock KBS: no data for %s", ticker)
                 continue
 
-            # Identify close and date columns defensively
+            # KBS columns: time, open, high, low, close, volume
             close_col = next(
                 (c for c in df.columns if c.lower() in ("close", "close_price")), None
             )
             time_col = next(
                 (c for c in df.columns if c.lower() in ("time", "date", "trading_date")), None
             )
+
             if close_col is None:
-                log.warning("vnstock: unrecognised columns for %s: %s", ticker, list(df.columns))
+                log.warning("vnstock KBS: unrecognised columns for %s: %s", ticker, list(df.columns))
                 continue
 
             df = df.dropna(subset=[close_col])
             if df.empty:
+                log.warning("vnstock KBS: all-NaN close for %s", ticker)
                 continue
 
-            price = float(df[close_col].iloc[-1]) * 1000   # TCBS quotes in thousands VND
+            price = float(df[close_col].iloc[-1])  # KBS prices are full VND
 
             if time_col:
                 raw_date = df[time_col].iloc[-1]
@@ -216,11 +199,11 @@ def fetch_via_vnstock(tickers: list[str]) -> dict[str, tuple[float | None, str |
             else:
                 dt = today_str
 
-            log.info("vnstock history   %-8s  %s  %.0f", ticker, dt, price)
+            log.info("vnstock KBS  %-8s  %s  %.0f", ticker, dt, price)
             results[ticker] = (price, dt)
 
         except Exception as exc:
-            log.warning("vnstock: error for %s — %s", ticker, exc)
+            log.warning("vnstock KBS: error for %s — %s", ticker, exc)
 
     return results
 
@@ -301,7 +284,7 @@ def main() -> None:
         prices.update(fetch_via_yfinance(yf_tickers))
 
     if upcom_tickers:
-        log.info("Fetching %d UPCoM tickers via vnstock (TCBS)...", len(upcom_tickers))
+        log.info("Fetching %d UPCoM tickers via vnstock (KBS)...", len(upcom_tickers))
         prices.update(fetch_via_vnstock(upcom_tickers))
 
     write_prices(ws, SHEET_CONFIG, ticker_rows, prices)
