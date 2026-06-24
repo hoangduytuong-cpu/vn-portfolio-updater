@@ -319,7 +319,6 @@ def main() -> None:
     # 1. Connect to Google Sheets
     gc = get_gspread_client()
     sh = gc.open_by_key(SHEET_CONFIG["spreadsheet_id"])
-log.info("Available tabs: %s", [ws.title for ws in sh.worksheets()])
     ws = sh.worksheet(SHEET_CONFIG["worksheet_name"])
     log.info("Sheet: '%s' → tab: '%s'", sh.title, ws.title)
 
