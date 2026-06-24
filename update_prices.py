@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 # ── Sheet layout — edit these to match YOUR sheet ──────────────────────────
 SHEET_CONFIG = {
     "spreadsheet_id":  os.environ["SPREADSHEET_ID"],
-    "worksheet_name":  "Portfolio",   # tab name inside the sheet
+    "worksheet_name":  "Updater",   # tab name inside the sheet
     "header_rows":     1,             # rows to skip at the top
     "ticker_col":      0,             # col A
     "exchange_col":    1,             # col B  (auto-filled if blank)
@@ -246,7 +246,7 @@ def fetch_via_vnstock(tickers: list[str]) -> dict[str, tuple[float | None, str |
             if df.empty:
                 continue
 
-            price = float(df[close_col].iloc[-1])
+            price = float(df[close_col].iloc[-1]) * 1000
 
             if time_col:
                 raw_date = df[time_col].iloc[-1]
