@@ -303,7 +303,7 @@ def write_prices(
         updates.append({"range": price_cell, "values": [[price]]})
         updates.append({"range": date_cell,  "values": [[dt]]})
         time_cell = gspread.utils.rowcol_to_a1(sheet_row, cfg["date_col"] + 2)
-        updates.append({"range": time_cell, "values": [[datetime.now(ICT).strftime("%H:%M ICT")]]})
+        updates.append({"range": time_cell, "values": [[datetime.now(ICT).strftime("%H:%M")]]})
 
     if not updates:
         log.warning("Nothing to write.")
