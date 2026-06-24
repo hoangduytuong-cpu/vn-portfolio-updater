@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 # ── Sheet layout — edit these to match YOUR sheet ──────────────────────────
 SHEET_CONFIG = {
     "spreadsheet_id":  os.environ["SPREADSHEET_ID"],
-    "worksheet_name":  "Portfolio",   # tab name inside the sheet
+    "worksheet_name":  "Updater",   # tab name inside the sheet
     "header_rows":     1,             # rows to skip at the top
     "ticker_col":      0,             # col A
     "exchange_col":    1,             # col B  (auto-filled if blank)
