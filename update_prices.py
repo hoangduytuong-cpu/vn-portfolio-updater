@@ -356,6 +356,11 @@ def main() -> None:
         log.info("Fetching %d UPCoM tickers via vnstock (KBS)...", len(upcom_tickers))
         prices.update(fetch_via_vnstock(upcom_tickers))
 
+    still_missing = [t for t in (yf_tickers) if prices.get(t, (None, None))[0] is None]
+    if still_missing:
+        log.info("yfinance failed for %s — retrying via KBS...", still_missing)
+        prices.update(fetch_via_vnstock(still_missing))
+
     # 5. Write prices
     write_prices(ws, SHEET_CONFIG, ticker_rows, prices)
     log.info("=== Done ===")
