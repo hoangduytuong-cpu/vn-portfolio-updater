@@ -339,19 +339,25 @@ def main() -> None:
     
     log.info("Tickers: %s", [(t, ex) for _, t, ex in ticker_rows])
 
-    # 4. Fetch all tickers via KBS regardless of exchange
-    all_tickers = [t for _, t, ex in ticker_rows if ex in ("HOSE", "HNX", "UPCOM")]
-    unknown     = [t for _, t, ex in ticker_rows if ex not in ("HOSE", "HNX", "UPCOM")]
+    # 4. Route by exchange
+    yf_tickers    = [t for _, t, ex in ticker_rows if ex in ("HOSE", "HNX")]
+    upcom_tickers = [t for _, t, ex in ticker_rows if ex == "UPCOM"]
+    unknown       = [t for _, t, ex in ticker_rows if ex not in ("HOSE", "HNX", "UPCOM")]
     if unknown:
         log.warning("Skipping tickers with unresolved exchange: %s", unknown)
 
     prices: dict[str, tuple[float | None, str | None]] = {}
 
-    if all_tickers:
-        log.info("Fetching %d tickers via vnstock (KBS)...", len(all_tickers))
-        prices.update(fetch_via_vnstock(all_tickers))
+    if yf_tickers:
+        log.info("Fetching %d HOSE/HNX tickers via yfinance...", len(yf_tickers))
+        prices.update(fetch_via_yfinance(yf_tickers))
 
-    still_missing = [t for t in (yf_tickers) if prices.get(t, (None, None))[0] is None]
+    if upcom_tickers:
+        log.info("Fetching %d UPCoM tickers via vnstock (KBS)...", len(upcom_tickers))
+        prices.update(fetch_via_vnstock(upcom_tickers))
+
+    # KBS fallback for any tickers that yfinance couldn't fetch
+    still_missing = [t for t in yf_tickers if prices.get(t, (None, None))[0] is None]
     if still_missing:
         log.info("yfinance failed for %s — retrying via KBS...", still_missing)
         prices.update(fetch_via_vnstock(still_missing))
